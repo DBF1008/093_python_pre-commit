@@ -82,6 +82,10 @@ def _add_run_options(parser: argparse.ArgumentParser) -> None:
         help='Stop after the first failing hook.',
     )
     parser.add_argument(
+        '--report-json',
+        help='Write a structured JSON report to this path.',
+    )
+    parser.add_argument(
         '--hook-stage',
         choices=clientlib.STAGES,
         type=clientlib.transform_stage,

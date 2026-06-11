@@ -57,6 +57,7 @@ def run_opts(
         checkout_type='',
         is_squash_merge='',
         rewrite_command='',
+        report_json='',
 ):
     # These are mutually exclusive
     assert not (all_files and files)
@@ -83,6 +84,7 @@ def run_opts(
         checkout_type=checkout_type,
         is_squash_merge=is_squash_merge,
         rewrite_command=rewrite_command,
+        report_json=report_json,
     )
 
 

@@ -25,6 +25,9 @@ from pre_commit.clientlib import load_config
 from pre_commit.hook import Hook
 from pre_commit.repository import all_hooks
 from pre_commit.repository import install_hook_envs
+from pre_commit.run_report import HookResult
+from pre_commit.run_report import RunReport
+from pre_commit.run_report import RunResult
 from pre_commit.staged_files_only import staged_files_only
 from pre_commit.store import Store
 from pre_commit.util import cmd_output_b
@@ -147,8 +150,9 @@ def _run_single_hook(
         diff_before: bytes,
         verbose: bool,
         use_color: bool,
-) -> tuple[bool, bytes]:
+) -> tuple[bool, bytes, HookResult]:
     filenames = tuple(classifier.filenames_for_hook(hook))
+    matched_filenames = filenames
 
     if hook.id in skips or hook.alias in skips:
         output.write(
@@ -164,6 +168,7 @@ def _run_single_hook(
         retcode = 0
         diff_after = diff_before
         files_modified = False
+        hook_status = 'skipped'
         out = b''
     elif not filenames and not hook.always_run:
         output.write(
@@ -180,6 +185,7 @@ def _run_single_hook(
         retcode = 0
         diff_after = diff_before
         files_modified = False
+        hook_status = 'skipped'
         out = b''
     else:
         # print hook and dots first in case the hook takes a while to run
@@ -208,9 +214,11 @@ def _run_single_hook(
         if retcode or files_modified:
             print_color = color.RED
             status = 'Failed'
+            hook_status = 'failed'
         else:
             print_color = color.GREEN
             status = 'Passed'
+            hook_status = 'passed'
 
         output.write_line(color.format_color(status, print_color, use_color))
 
@@ -232,7 +240,18 @@ def _run_single_hook(
             output.write_line_b(out.strip(), logfile_name=hook.log_file)
             output.write_line()
 
-    return files_modified or bool(retcode), diff_after
+    hook_result = HookResult(
+        hook_id=hook.id,
+        hook_name=hook.name,
+        status=hook_status,
+        files=matched_filenames,
+        duration_s=duration,
+        return_code=retcode,
+        files_modified=files_modified,
+        diff=diff_after.decode(errors='replace') if files_modified else None,
+    )
+
+    return files_modified or bool(retcode), diff_after, hook_result
 
 
 def _compute_cols(hooks: Sequence[Hook]) -> int:
@@ -284,19 +303,21 @@ def _run_hooks(
         hooks: Sequence[Hook],
         skips: set[str],
         args: argparse.Namespace,
-) -> int:
+) -> tuple[int, RunReport]:
     """Actually run the hooks."""
     cols = _compute_cols(hooks)
     classifier = Classifier.from_config(
         _all_filenames(args), config['files'], config['exclude'],
     )
     retval = 0
+    results: list[HookResult] = []
     prior_diff = _get_diff()
     for hook in hooks:
-        current_retval, prior_diff = _run_single_hook(
+        current_retval, prior_diff, hook_result = _run_single_hook(
             classifier, hook, skips, cols, prior_diff,
             verbose=args.verbose, use_color=args.color,
         )
+        results.append(hook_result)
         retval |= current_retval
         fail_fast = (config['fail_fast'] or hook.fail_fast or args.fail_fast)
         if current_retval and fail_fast:
@@ -319,7 +340,8 @@ def _run_hooks(
             f'--color={git_color_opt}',
         ))
 
-    return retval
+    report = RunReport(results=results, retval=retval)
+    return retval, report
 
 
 def _has_unmerged_paths() -> bool:
@@ -340,22 +362,22 @@ def run(
         store: Store,
         args: argparse.Namespace,
         environ: MutableMapping[str, str] = os.environ,
-) -> int:
+) -> RunResult:
     stash = not args.all_files and not args.files
 
     # Check if we have unresolved merge conflict files and fail fast.
     if stash and _has_unmerged_paths():
         logger.error('Unmerged files.  Resolve before committing.')
-        return 1
+        return RunResult(1)
     if bool(args.from_ref) != bool(args.to_ref):
         logger.error('Specify both --from-ref and --to-ref.')
-        return 1
+        return RunResult(1)
     if stash and _has_unstaged_config(config_file):
         logger.error(
             f'Your pre-commit configuration is unstaged.\n'
             f'`git add {config_file}` to fix this.',
         )
-        return 1
+        return RunResult(1)
     if (
             args.hook_stage in {'prepare-commit-msg', 'commit-msg'} and
             not args.commit_msg_filename
@@ -364,13 +386,13 @@ def run(
             f'`--commit-msg-filename` is required for '
             f'`--hook-stage {args.hook_stage}`',
         )
-        return 1
+        return RunResult(1)
     # prevent recursive post-checkout hooks (#1418)
     if (
             args.hook_stage == 'post-checkout' and
             environ.get('_PRE_COMMIT_SKIP_POST_CHECKOUT')
     ):
-        return 0
+        return RunResult(0)
 
     # Expose prepare_commit_message_source / commit_object_name
     # as environment variables for the hooks
@@ -432,7 +454,7 @@ def run(
             output.write_line(
                 f'No hook with id `{args.hook}` in stage `{args.hook_stage}`',
             )
-            return 1
+            return RunResult(1)
 
         skips = _get_skips(environ)
         to_install = [
@@ -442,7 +464,13 @@ def run(
         ]
         install_hook_envs(to_install, store)
 
-        return _run_hooks(config, hooks, skips, args)
+        retval, report = _run_hooks(config, hooks, skips, args)
+
+        report_json = getattr(args, 'report_json', None)
+        if report_json:
+            report.write_json(report_json)
+
+        return RunResult(retval, report)
 
     # https://github.com/python/mypy/issues/7726
     raise AssertionError('unreachable')
