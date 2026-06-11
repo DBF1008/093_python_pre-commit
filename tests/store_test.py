@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import os.path
 import shlex
+import shutil
 import sqlite3
 import stat
+import threading
 from unittest import mock
 
 import pytest
@@ -184,16 +186,18 @@ def test_clone_cleans_up_on_checkout_failure(store):
     assert repo_dirs == []
 
 
-def test_clone_when_repo_already_exists(store):
-    # Create an entry in the sqlite db that makes it look like the repo has
-    # been cloned.
+def test_clone_when_repo_already_exists(store, tmp_path):
+    # Create a real directory and an entry in the sqlite db that makes it
+    # look like the repo has been cloned.
+    cached_dir = str(tmp_path.joinpath('cached_repo'))
+    os.makedirs(cached_dir)
     with sqlite3.connect(store.db_path) as db:
         db.execute(
-            'INSERT INTO repos (repo, ref, path) '
-            'VALUES ("fake_repo", "fake_ref", "fake_path")',
+            'INSERT INTO repos (repo, ref, path) VALUES (?, ?, ?)',
+            ('fake_repo', 'fake_ref', cached_dir),
         )
 
-    assert store.clone('fake_repo', 'fake_ref') == 'fake_path'
+    assert store.clone('fake_repo', 'fake_ref') == cached_dir
 
 
 def test_clone_shallow_failure_fallback_to_complete(
@@ -341,3 +345,122 @@ def test_clone_with_recursive_submodules(store, tmp_path):
     assert os.path.exists(ret)
     assert os.path.exists(os.path.join(ret, str(repo), 'repository'))
     assert os.path.exists(os.path.join(ret, str(sub), 'submodule'))
+
+
+def test_clone_recovers_when_repo_dir_missing(store, tempdir_factory, caplog):
+    path = git_dir(tempdir_factory)
+    with cwd(path):
+        git_commit()
+        rev = git.head_rev(path)
+        git_commit()
+
+    # First clone succeeds normally
+    ret1 = store.clone(path, rev)
+    assert os.path.isdir(ret1)
+    assert git.head_rev(ret1) == rev
+
+    # Simulate partial PRE_COMMIT_HOME cleanup: remove the repo directory
+    # but leave the sqlite record in place
+    shutil.rmtree(ret1)
+    assert not os.path.exists(ret1)
+
+    caplog.clear()
+
+    # Second clone should detect the stale path, re-clone, and update the db
+    ret2 = store.clone(path, rev)
+    assert os.path.isdir(ret2)
+    assert ret2 != ret1
+    assert git.head_rev(ret2) == rev
+
+    # DB should now point to the new path only
+    repos = _select_all_repos(store)
+    assert repos == [(path, rev, ret2)]
+
+    # Should have logged the re-creation
+    messages = [r.message for r in caplog.records]
+    assert any('Re-creating missing repo directory' in m for m in messages)
+    assert any('Initializing environment' in m for m in messages)
+
+
+def test_clone_recovery_concurrent_no_duplicate(store, tempdir_factory):
+    path = git_dir(tempdir_factory)
+    with cwd(path):
+        git_commit()
+        rev = git.head_rev(path)
+        git_commit()
+
+    # Clone once, then delete to create a stale entry
+    ret1 = store.clone(path, rev)
+    shutil.rmtree(ret1)
+
+    results = []
+    errors = []
+
+    def do_clone():
+        try:
+            results.append(store.clone(path, rev))
+        except Exception as e:
+            errors.append(e)
+
+    t1 = threading.Thread(target=do_clone)
+    t2 = threading.Thread(target=do_clone)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert not errors
+    # Both threads should get valid, identical paths
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert os.path.isdir(results[0])
+
+    # DB should contain exactly one entry
+    repos = _select_all_repos(store)
+    assert len(repos) == 1
+    assert repos[0] == (path, rev, results[0])
+
+
+@xfailif_windows  # pragma: win32 no cover
+def test_clone_stale_path_readonly_returns_stale(tmpdir):
+    store_dir = tmpdir.join('store')
+    store = Store(str(store_dir))
+
+    # Insert a stale record pointing to a non-existent directory
+    stale_path = str(tmpdir.join('gone'))
+    with sqlite3.connect(store.db_path) as db:
+        db.execute(
+            'INSERT INTO repos (repo, ref, path) VALUES (?, ?, ?)',
+            ('repo', 'ref', stale_path),
+        )
+
+    # Make store readonly
+    def _chmod_minus_w(p):
+        st = os.stat(p)
+        os.chmod(p, st.st_mode & ~(stat.S_IWUSR | stat.S_IWOTH | stat.S_IWGRP))
+
+    _chmod_minus_w(store_dir)
+    for fname in os.listdir(str(store_dir)):
+        _chmod_minus_w(os.path.join(str(store_dir), fname))
+
+    ro_store = Store(str(store_dir))
+    assert ro_store.readonly
+
+    # Should return the stale path without attempting recovery
+    assert ro_store.clone('repo', 'ref') == stale_path
+
+
+def test_clone_cache_hit_no_reinit(store, tempdir_factory, caplog):
+    path = git_dir(tempdir_factory)
+    with cwd(path):
+        git_commit()
+        rev = git.head_rev(path)
+        git_commit()
+
+    ret1 = store.clone(path, rev)
+    caplog.clear()
+
+    # Second clone should be a fast cache hit with no log output
+    ret2 = store.clone(path, rev)
+    assert ret2 == ret1
+    assert caplog.record_tuples == []

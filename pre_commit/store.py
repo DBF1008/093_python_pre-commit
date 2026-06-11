@@ -150,12 +150,27 @@ class Store:
 
         result = _get_result()
         if result:
-            return result
+            if os.path.isdir(result):
+                return result
+            # Stale path but store is readonly -- cannot recover
+            if self.readonly:
+                return result
+
         with self.exclusive_lock():
             # Another process may have already completed this work
             result = _get_result()
-            if result:  # pragma: no cover (race)
-                return result
+            if result:
+                if os.path.isdir(result):
+                    return result
+                # Stale entry: db record exists but directory is missing
+                logger.info(
+                    f'Re-creating missing repo directory for {repo}.',
+                )
+                with self.connect() as db:
+                    db.execute(
+                        'DELETE FROM repos WHERE repo = ? AND ref = ?',
+                        (repo, ref),
+                    )
 
             logger.info(f'Initializing environment for {repo}.')
 
