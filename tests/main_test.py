@@ -90,7 +90,7 @@ def test_adjust_args_try_repo_repo_relative(in_git_dir):
 
 
 FNS = (
-    'autoupdate', 'clean', 'gc', 'install', 'install_hooks',
+    'autoupdate', 'clean', 'diagnose', 'gc', 'install', 'install_hooks',
     'migrate_config', 'run', 'sample_config', 'uninstall',
     'validate_config', 'validate_manifest',
 )

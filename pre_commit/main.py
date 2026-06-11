@@ -13,6 +13,7 @@ from pre_commit.color import add_color_option
 from pre_commit.commands import hazmat
 from pre_commit.commands.autoupdate import autoupdate
 from pre_commit.commands.clean import clean
+from pre_commit.commands.diagnose import diagnose
 from pre_commit.commands.gc import gc
 from pre_commit.commands.hook_impl import hook_impl
 from pre_commit.commands.init_templatedir import init_templatedir
@@ -244,6 +245,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     _add_cmd('clean', help='Clean out pre-commit files.')
 
+    diagnose_parser = _add_cmd(
+        'diagnose',
+        help='Show hook environment info and health status.',
+    )
+    _add_config_option(diagnose_parser)
+    diagnose_parser.add_argument(
+        '--json', action='store_true', dest='output_json',
+        help='Output in JSON format for scripting.',
+    )
+
     _add_cmd('gc', help='Clean unused cached repos.')
 
     hazmat_parser = _add_cmd(
@@ -393,6 +404,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == 'clean':
             return clean(store)
+        elif args.command == 'diagnose':
+            return diagnose(
+                args.config,
+                store,
+                output_json=args.output_json,
+            )
         elif args.command == 'gc':
             return gc(store)
         elif args.command == 'hazmat':
