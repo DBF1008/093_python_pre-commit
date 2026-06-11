@@ -31,7 +31,15 @@ def _state_filename_v2(venv: str) -> str:
 
 
 def _state(additional_deps: Sequence[str]) -> object:
-    return {'additional_dependencies': additional_deps}
+    return {'additional_dependencies': sorted(additional_deps)}
+
+
+def _normalize_state(state: object) -> object:
+    if isinstance(state, dict) and 'additional_dependencies' in state:
+        return {
+            'additional_dependencies': sorted(state['additional_dependencies']),
+        }
+    return state
 
 
 def _read_state(venv: str) -> object | None:
@@ -56,7 +64,7 @@ def _hook_installed(hook: Hook) -> bool:
     return (
         (
             os.path.exists(_state_filename_v2(venv)) or
-            _read_state(venv) == _state(hook.additional_dependencies)
+            _normalize_state(_read_state(venv)) == _state(hook.additional_dependencies)
         ) and
         not lang.health_check(hook.prefix, hook.language_version)
     )

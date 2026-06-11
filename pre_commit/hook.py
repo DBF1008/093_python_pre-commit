@@ -42,7 +42,7 @@ class Hook(NamedTuple):
             self.prefix,
             self.language,
             self.language_version,
-            tuple(self.additional_dependencies),
+            tuple(sorted(self.additional_dependencies)),
         )
 
     @classmethod

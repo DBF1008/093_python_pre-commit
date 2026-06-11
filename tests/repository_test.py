@@ -183,6 +183,66 @@ def test_additional_dependencies_roll_forward(tempdir_factory, store):
         assert 'mccabe' not in cmd_output('pip', 'freeze', '-l')[1]
 
 
+def test_additional_dependencies_order_does_not_reinstall(
+        tempdir_factory, store, caplog,
+):
+    path = make_repo(tempdir_factory, 'python_hooks_repo')
+
+    # Install with deps in one order
+    config1 = make_config_from_repo(path)
+    config1['hooks'][0]['additional_dependencies'] = ['mccabe', 'pyflakes']
+    hook1 = _get_hook(config1, store, 'foo')
+    caplog.clear()
+
+    # "Install" with deps in reversed order -- should NOT reinstall
+    config2 = make_config_from_repo(path)
+    config2['hooks'][0]['additional_dependencies'] = ['pyflakes', 'mccabe']
+    hook2 = _get_hook(config2, store, 'foo')
+    assert len(caplog.record_tuples) == 0
+
+
+def test_v1_state_unsorted_deps_still_matches(tempdir_factory, store):
+    """Old v1 state files with unsorted deps should still be recognized."""
+    import json
+
+    path = make_repo(tempdir_factory, 'python_hooks_repo')
+    config = make_config_from_repo(path)
+    config['hooks'][0]['additional_dependencies'] = ['pyflakes', 'mccabe']
+    hook = _get_hook(config, store, 'foo')
+
+    envdir = lang_base.environment_dir(
+        hook.prefix,
+        python.ENVIRONMENT_DIR,
+        hook.language_version,
+    )
+    # Remove v2 to force v1 check path
+    os.remove(os.path.join(envdir, '.install_state_v2'))
+    # Write old-style unsorted v1 state (simulating pre-fix behavior)
+    with open(os.path.join(envdir, '.install_state_v1'), 'w') as f:
+        f.write(json.dumps({'additional_dependencies': ['pyflakes', 'mccabe']}))
+
+    assert _hook_installed(hook) is True
+
+
+def test_install_key_order_independent():
+    """install_key should be the same regardless of deps order."""
+    base = {
+        'id': 'test', 'name': 'test', 'entry': 'test',
+        'language': 'python', 'alias': '', 'files': '',
+        'exclude': '', 'types': [], 'types_or': [],
+        'exclude_types': [], 'args': [], 'always_run': False,
+        'fail_fast': False, 'pass_filenames': True,
+        'description': '', 'language_version': 'default',
+        'log_file': '', 'minimum_pre_commit_version': '0',
+        'require_serial': False, 'stages': [], 'verbose': False,
+    }
+    prefix = Prefix('/tmp/test')
+
+    hook1 = Hook.create('src', prefix, {**base, 'additional_dependencies': ['b', 'a']})
+    hook2 = Hook.create('src', prefix, {**base, 'additional_dependencies': ['a', 'b']})
+    assert hook1.install_key == hook2.install_key
+
+
 @pytest.mark.parametrize('v', ('v1', 'v2'))
 def test_repository_state_compatibility(tempdir_factory, store, v):
     path = make_repo(tempdir_factory, 'python_hooks_repo')

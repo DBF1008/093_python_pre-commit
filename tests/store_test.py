@@ -260,7 +260,16 @@ def test_create_when_store_already_exists(store):
 
 def test_db_repo_name(store):
     assert store.db_repo_name('repo', ()) == 'repo'
-    assert store.db_repo_name('repo', ('b', 'a', 'c')) == 'repo:b,a,c'
+    assert store.db_repo_name('repo', ('b', 'a', 'c')) == 'repo:a,b,c'
+
+
+def test_db_repo_name_order_independent(store):
+    assert (
+        store.db_repo_name('repo', ('b', 'a', 'c'))
+        == store.db_repo_name('repo', ('a', 'c', 'b'))
+        == store.db_repo_name('repo', ('c', 'b', 'a'))
+        == 'repo:a,b,c'
+    )
 
 
 def test_local_resources_reflects_reality():
