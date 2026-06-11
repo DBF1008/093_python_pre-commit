@@ -181,19 +181,22 @@ def autoupdate(
     jobs = min(jobs, len(repos) or len(config_repos))  # max 1-per-thread
     jobs = max(jobs, 1)  # at least one thread
     with concurrent.futures.ThreadPoolExecutor(jobs) as exe:
-        futures = [
+        futures = {
             exe.submit(
                 _update_one,
                 i, repo, tags_only=tags_only, freeze=freeze,
-            )
+            ): repo['repo']
             for i, repo in enumerate(config_repos)
             if not repos or repo['repo'] in repos
-        ]
+        }
         for future in concurrent.futures.as_completed(futures):
             try:
                 i, old, new = future.result()
             except RepositoryCannotBeUpdatedError as e:
                 output.write_line(str(e))
+                retv = 1
+            except Exception as e:
+                output.write_line(f'[{futures[future]}] {e}')
                 retv = 1
             else:
                 if new.rev != old.rev:

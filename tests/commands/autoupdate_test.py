@@ -10,6 +10,7 @@ from pre_commit import envcontext
 from pre_commit import git
 from pre_commit import yaml
 from pre_commit.commands.autoupdate import _check_hooks_still_exist_at_rev
+from pre_commit.commands.autoupdate import _update_one
 from pre_commit.commands.autoupdate import autoupdate
 from pre_commit.commands.autoupdate import RepositoryCannotBeUpdatedError
 from pre_commit.commands.autoupdate import RevInfo
@@ -530,3 +531,189 @@ def test_maintains_rev_quoting_style(tmpdir, out_of_date):
     assert autoupdate(str(cfg), freeze=False, tags_only=False) == 0
     expected = fmt.format(path=out_of_date.path, rev=out_of_date.head_rev)
     assert cfg.read() == expected
+
+
+def test_autoupdate_partial_failure_repo_error(
+        out_of_date, hook_disappearing, tmpdir,
+):
+    contents = (
+        f'repos:\n'
+        f'-   repo: {out_of_date.path}\n'
+        f'    rev: {out_of_date.original_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+        f'-   repo: {hook_disappearing.path}\n'
+        f'    rev: {hook_disappearing.original_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+    )
+    cfg = tmpdir.join(C.CONFIG_FILE)
+    cfg.write(contents)
+
+    ret = autoupdate(str(cfg), freeze=False, tags_only=False)
+    assert ret == 1
+    result = cfg.read()
+    # successful repo is updated
+    assert out_of_date.head_rev in result
+    # failed repo remains unchanged
+    assert hook_disappearing.original_rev in result
+
+
+def test_autoupdate_partial_failure_unexpected_error(
+        out_of_date, up_to_date, tmpdir,
+):
+    up_to_date_rev = git.head_rev(up_to_date)
+    contents = (
+        f'repos:\n'
+        f'-   repo: {out_of_date.path}\n'
+        f'    rev: {out_of_date.original_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+        f'-   repo: {up_to_date}\n'
+        f'    rev: {up_to_date_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+    )
+    cfg = tmpdir.join(C.CONFIG_FILE)
+    cfg.write(contents)
+
+    original = _update_one
+
+    def side_effect(i, repo, *, tags_only, freeze):
+        if repo['repo'] == up_to_date:
+            raise RuntimeError('unexpected git error')
+        return original(i, repo, tags_only=tags_only, freeze=freeze)
+
+    with mock.patch(
+            'pre_commit.commands.autoupdate._update_one',
+            side_effect=side_effect,
+    ):
+        ret = autoupdate(str(cfg), freeze=False, tags_only=False)
+
+    assert ret == 1
+    result = cfg.read()
+    # successful repo is updated despite the other raising an unexpected error
+    assert out_of_date.head_rev in result
+    # failed repo remains unchanged
+    assert up_to_date_rev in result
+
+
+def test_autoupdate_partial_failure_preserves_frozen(
+        out_of_date, hook_disappearing, tmpdir,
+):
+    contents = (
+        f'repos:\n'
+        f'-   repo: {hook_disappearing.path}\n'
+        f'    rev: {hook_disappearing.original_rev}  # frozen: v1.0.0\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+        f'-   repo: {out_of_date.path}\n'
+        f'    rev: {out_of_date.original_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+    )
+    cfg = tmpdir.join(C.CONFIG_FILE)
+    cfg.write(contents)
+
+    ret = autoupdate(str(cfg), freeze=False, tags_only=False)
+    assert ret == 1
+    result = cfg.read()
+    # frozen comment on failed repo is preserved exactly
+    assert (
+        f'    rev: {hook_disappearing.original_rev}  # frozen: v1.0.0\n'
+        in result
+    )
+    # successful repo is updated
+    assert out_of_date.head_rev in result
+
+
+def test_autoupdate_partial_failure_preserves_trailing_comment(
+        out_of_date, hook_disappearing, tmpdir,
+):
+    contents = (
+        f'repos:\n'
+        f'-   repo: {hook_disappearing.path}\n'
+        f'    rev: {hook_disappearing.original_rev}  # my important note\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+        f'-   repo: {out_of_date.path}\n'
+        f'    rev: {out_of_date.original_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+    )
+    cfg = tmpdir.join(C.CONFIG_FILE)
+    cfg.write(contents)
+
+    ret = autoupdate(str(cfg), freeze=False, tags_only=False)
+    assert ret == 1
+    result = cfg.read()
+    # trailing comment on failed repo is preserved exactly
+    assert (
+        f'    rev: {hook_disappearing.original_rev}  # my important note\n'
+        in result
+    )
+    # successful repo is updated
+    assert out_of_date.head_rev in result
+
+
+def test_autoupdate_partial_failure_with_repo_filter(
+        out_of_date, hook_disappearing, up_to_date, tmpdir,
+):
+    up_to_date_rev = git.head_rev(up_to_date)
+    contents = (
+        f'repos:\n'
+        f'-   repo: {out_of_date.path}\n'
+        f'    rev: {out_of_date.original_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+        f'-   repo: {hook_disappearing.path}\n'
+        f'    rev: {hook_disappearing.original_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+        f'-   repo: {up_to_date}\n'
+        f'    rev: {up_to_date_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+    )
+    cfg = tmpdir.join(C.CONFIG_FILE)
+    cfg.write(contents)
+
+    # only filter out_of_date and hook_disappearing, leave up_to_date alone
+    ret = autoupdate(
+        str(cfg), freeze=False, tags_only=False,
+        repos=(out_of_date.path, hook_disappearing.path),
+    )
+    assert ret == 1
+    result = cfg.read()
+    # filtered successful repo is updated
+    assert out_of_date.head_rev in result
+    # filtered failed repo remains unchanged
+    assert hook_disappearing.original_rev in result
+    # unfiltered repo remains unchanged
+    assert up_to_date_rev in result
+
+
+def test_autoupdate_concurrent_partial_failure(
+        out_of_date, hook_disappearing, tmpdir,
+):
+    contents = (
+        f'repos:\n'
+        f'-   repo: {out_of_date.path}\n'
+        f'    rev: {out_of_date.original_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+        f'-   repo: {hook_disappearing.path}\n'
+        f'    rev: {hook_disappearing.original_rev}\n'
+        f'    hooks:\n'
+        f'    -   id: foo\n'
+    )
+    cfg = tmpdir.join(C.CONFIG_FILE)
+    cfg.write(contents)
+
+    ret = autoupdate(str(cfg), freeze=False, tags_only=False, jobs=2)
+    assert ret == 1
+    result = cfg.read()
+    # successful repo is updated even with concurrent execution
+    assert out_of_date.head_rev in result
+    # failed repo remains unchanged
+    assert hook_disappearing.original_rev in result
